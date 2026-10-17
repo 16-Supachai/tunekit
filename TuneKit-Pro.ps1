@@ -142,10 +142,29 @@ Set-TrackedValue "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 1 "DWo
 Set-TrackedValue "HKCU:\System\GameConfigStore" "GameDVR_FSEBehaviorMode" 2 "DWord" "Disable fullscreen optimizations"
 Set-TrackedValue "HKCU:\System\GameConfigStore" "GameDVR_HonorUserFSEBehaviorMode" 1 "DWord" "Honor fullscreen optimization setting"
 
-# ---------- 3) Raw mouse input (removes Windows mouse acceleration) ----------
+# ---------- 3) Mouse/keyboard responsiveness: everything Windows can really do ----------
+# Note: polling rate and debounce time live in the mouse/keyboard hardware or its own
+# vendor software, not in the registry. This section only touches what Windows itself
+# controls: pointer acceleration and USB power saving (both verified to affect input feel).
+
+# "Enhance pointer precision" OFF -> 1 inch of hand movement always equals the
+# same on-screen distance, instead of Windows accelerating it based on hand speed.
 Set-TrackedValue "HKCU:\Control Panel\Mouse" "MouseSpeed" "0" "String" "Mouse acceleration off (1/3)"
 Set-TrackedValue "HKCU:\Control Panel\Mouse" "MouseThreshold1" "0" "String" "Mouse acceleration off (2/3)"
 Set-TrackedValue "HKCU:\Control Panel\Mouse" "MouseThreshold2" "0" "String" "Mouse acceleration off (3/3)"
+
+# USB Selective Suspend OFF -> stops Windows from power-saving USB ports, which can
+# otherwise add a brief wake-up delay the first time you move the mouse/press a key
+# after idling.
+try {
+    $activePlanText = powercfg /getactivescheme | Out-String
+    if ($activePlanText -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+        $plan = $Matches[1]
+        powercfg /setacvalueindex $plan 2a700226-f241-4c9e-8c10-953882c24183 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0
+        powercfg /setactive $plan
+        Log "OK: USB Selective Suspend disabled" "Cyan"
+    }
+} catch { Log "FAILED: USB selective suspend -> $($_.Exception.Message)" "Red" }
 
 # ---------- 4) Network: Nagle's algorithm off for lower latency ----------
 $ifaces = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces" -ErrorAction SilentlyContinue
