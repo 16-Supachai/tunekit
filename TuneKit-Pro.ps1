@@ -14,8 +14,19 @@
 #   - Clear log file so you (and your customer) can see exactly what ran.
 # =========================================================
 param(
-    [switch]$Undo
+    [switch]$Undo,
+    [switch]$PriorityOnly   # Just raise FiveM/GTA5 to High priority for this session. No admin changes saved/undoable.
 )
+
+if ($PriorityOnly) {
+    $procs = Get-Process -Name "FiveM","FiveM_b2060","GTA5","fivem_web_b2060" -ErrorAction SilentlyContinue
+    if (-not $procs) { Write-Host "FiveM/GTA5 not running." -ForegroundColor Yellow; exit 0 }
+    foreach ($p in $procs) {
+        try { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High; Write-Host "OK: $($p.Name) -> High priority" -ForegroundColor Cyan }
+        catch { Write-Host "FAILED: $($p.Name)" -ForegroundColor Red }
+    }
+    exit 0
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -91,6 +102,14 @@ if ($Undo) {
         Log "Restored Delivery Optimization service" "Cyan"
     }
 
+    foreach ($svc in $saved.XboxServices) {
+        try {
+            Set-Service -Name $svc.Name -StartupType $svc.StartType -ErrorAction SilentlyContinue
+            if ($svc.StartType -eq "Automatic") { Start-Service $svc.Name -ErrorAction SilentlyContinue }
+            Log "Restored service: $($svc.Name)" "Cyan"
+        } catch {}
+    }
+
     Log "Undo complete. Restart the PC to fully apply." "Green"
     exit 0
 }
@@ -100,7 +119,7 @@ if ($Undo) {
 # =========================================================
 Log "=== TuneKit-Pro start ===" "Green"
 $script:RegistryChanges = @()
-$saved = [ordered]@{ Registry = @(); PowerScheme = $null; DoSvcStartupType = $null }
+$saved = [ordered]@{ Registry = @(); PowerScheme = $null; DoSvcStartupType = $null; XboxServices = @() }
 
 # ---------- Restore point ----------
 try {
@@ -187,6 +206,63 @@ try {
     Set-Service DoSvc -StartupType Manual -ErrorAction SilentlyContinue
     Log "OK: Delivery Optimization service set to Manual" "Cyan"
 } catch { Log "FAILED: Delivery Optimization service -> $($_.Exception.Message)" "Red" }
+
+# ---------- 6b) Maximum FPS / minimum input lag pass ----------
+# These are the Windows-side levers that actually move the needle for FiveM.
+# The single biggest lever (in-game graphics settings / settings.xml) is NOT
+# something this script should silently rewrite -- see the note at the end.
+
+# Fully disable Xbox Game Bar + Game DVR services (not just the overlay toggle)
+Set-TrackedValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "GameDVR_Enabled" 0 "DWord" "Disable Game DVR (full)"
+Set-TrackedValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" "AllowGameDVR" 0 "DWord" "Policy-level Game DVR disable"
+
+# Stop background UWP apps from running/updating while you play
+Set-TrackedValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" "GlobalUserDisabled" 1 "DWord" "Disable background UWP apps"
+
+# NVIDIA: Low Latency Mode = Ultra (driver-level input lag reduction, like Reflex
+# for games that don't natively support it). AMD has an equivalent "Anti-Lag" but
+# it is driver-UI only; there is no safe registry path for it.
+if ($gpuType -eq "NVIDIA") {
+    Set-TrackedValue "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\Global\NVTweak" "UllModeEnabled" 1 "DWord" "NVIDIA Low Latency Mode: on"
+    Set-TrackedValue "HKLM:\SYSTEM\CurrentControlSet\Services\nvlddmkm\Global\NVTweak" "UllModeLevel" 2 "DWord" "NVIDIA Low Latency Mode: Ultra"
+}
+
+# Give FiveM/GTA5 High process priority for this session (must be set again each
+# time the game is launched -- there's no safe permanent registry equivalent that
+# doesn't also affect Windows' own responsiveness).
+$gameProcs = Get-Process -Name "FiveM","FiveM_b2060","GTA5","fivem_web_b2060" -ErrorAction SilentlyContinue
+foreach ($p in $gameProcs) {
+    try { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High; Log "OK: $($p.Name) set to High priority" "Cyan" }
+    catch { Log "FAILED: could not raise priority for $($p.Name)" "Red" }
+}
+if (-not $gameProcs) { Log "FiveM not running - start it, then run: .\TuneKit-Pro.ps1 -PriorityOnly to boost it mid-session" "Yellow" }
+
+# Strip Windows visual effects that cost a small amount of GPU/CPU for no benefit
+# while gaming (animations, shadows under windows, etc.)
+Set-TrackedValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" 2 "DWord" "Windows visual effects: best performance"
+
+# Network Throttling Index off -> removes a Windows QoS limit originally meant to
+# protect multimedia playback, which otherwise caps background network throughput
+# and can add tiny amounts of jitter under load.
+Set-TrackedValue "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "NetworkThrottlingIndex" 0xffffffff "DWord" "Remove network throttling limit"
+
+# System responsiveness = 0 -> tells Windows' multimedia scheduler to give
+# foreground game audio/graphics threads first priority instead of reserving
+# CPU headroom for background tasks.
+Set-TrackedValue "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" "SystemResponsiveness" 0 "DWord" "Prioritize foreground app over background tasks"
+
+# Stop Xbox-related services nobody uses outside of Xbox Game Pass / cross-play
+foreach ($svc in @("XblAuthManager","XblGameSave","XboxNetApiSvc","XboxGipSvc")) {
+    try {
+        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+        if ($s) {
+            $saved.XboxServices += @{ Name = $svc; StartType = $s.StartType }
+            Stop-Service $svc -Force -ErrorAction SilentlyContinue
+            Set-Service $svc -StartupType Manual -ErrorAction SilentlyContinue
+            Log "OK: $svc set to Manual (stopped)" "Cyan"
+        }
+    } catch {}
+}
 
 # ---------- 7) Power plan: Ultimate/High performance ----------
 try {
